@@ -185,12 +185,31 @@ function parseAgentResult(key: keyof typeof AGENTS, res: { text: string }): Agen
   const p = safeJson<AgentJSON>(res.text)
   
   // Coerce signals and features to strings — LLM may return objects
-  const toStringArray = (arr: unknown): string[] => {
-    if (!Array.isArray(arr)) return []
-    return arr.map(item =>
-      typeof item === "string" ? item : JSON.stringify(item)
-    )
-  }
+const toStringArray = (arr: unknown): string[] => {
+  if (!Array.isArray(arr)) return []
+  return arr.map(item => {
+    if (typeof item === "string") return item
+    if (typeof item === "object" && item !== null) {
+      const obj = item as Record<string, any>
+      // Handle {type, entities} shape — flatten to readable strings
+      if (obj.type === "entities" && Array.isArray(obj.entities)) {
+        return obj.entities.map((e: any) =>
+          typeof e === "string" ? e : `${e.text ?? ""} (${e.type ?? "entity"})`
+        ).join(", ")
+      }
+      // Handle {type, patterns} shape
+      if (obj.type === "patterns" && Array.isArray(obj.patterns)) {
+        return obj.patterns.map((p: any) =>
+          typeof p === "string" ? p : `${p.text ?? ""}`
+        ).join(", ")
+      }
+      // Generic fallback — extract all string values
+      const values = Object.values(obj).filter(v => typeof v === "string")
+      if (values.length > 0) return values.join(": ")
+    }
+    return JSON.stringify(item)
+  }).filter(Boolean)
+}
 
   return {
     key,
@@ -360,14 +379,21 @@ Return only strict JSON: {"risk":"low"|"medium"|"high","confidence":number,"expl
   }
 
   // ── 4. Save to Supabase ──
-  if (phone) {
-    await supabase.from("fraud_checks").insert({
-      phone,
-      text_preview: text.slice(0, 200),
-      risk: decision.risk,
-      checked_at: new Date().toISOString(),
-    })
+// ── 4. Save to Supabase ──
+if (phone) {
+  const { error: dbError } = await supabase.from("fraud_checks").insert({
+    phone,
+    text_preview: text.slice(0, 200),
+    risk: decision.risk,
+    ml_prediction: mlResult?.prediction ?? "unknown",
+    ml_confidence: mlResult?.confidence ?? 0,
+    explanation: decision.explanation ?? "",
+    checked_at: new Date().toISOString(),
+  })
+  if (dbError) {
+    console.error("Supabase insert error:", dbError)
   }
+}
 
   // ── 5. Return ──
   const result: AnalysisResult = {
