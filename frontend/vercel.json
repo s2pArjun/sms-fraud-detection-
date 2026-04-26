@@ -8,15 +8,18 @@
       "destination": "/api/:path*"
     }
   ],
-  "functions": {
-    "app/api/analyze/route.ts": {
-      "maxDuration": 60
-    },
-    "app/api/feedback/route.ts": {
-      "maxDuration": 60
-    },
-    "app/api/sms-webhook/route.ts": {
-      "maxDuration": 60
-    }
+"functions": {
+  "app/api/analyze/route.ts": {
+    "maxDuration": 60
+  },
+  "app/api/feedback/route.ts": {
+    "maxDuration": 60
+  },
+  "app/api/sms-webhook/route.ts": {
+    "maxDuration": 60
+  },
+  "app/api/whatsapp-webhook/route.ts": {
+    "maxDuration": 60
   }
+}
 }
