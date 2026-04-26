@@ -6,6 +6,7 @@ export async function POST(req: Request) {
     const formData = await req.formData()
 
     const body = formData.get("Body") as string
+    const from = formData.get("From") as string
 
     // If no SMS body, return empty TwiML
     if (!body) {
@@ -31,6 +32,7 @@ export async function POST(req: Request) {
         },
         body: JSON.stringify({
           text: body,
+          senderPhone: from,
           detectionMethod: "both",
         }),
       })

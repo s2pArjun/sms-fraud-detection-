@@ -16,6 +16,7 @@ type AnalyzeBody = {
   receivedAt?: string
   priorFromSender?: number
   detectionMethod: DetectionMethod
+  senderPhone?: string
 }
 
 async function analyzeFetcher(url: string, { arg }: { arg: AnalyzeBody }) {
@@ -43,6 +44,7 @@ export default function SmsAnalyzerForm() {
   const [receivedAt, setReceivedAt] = useState<string>("")
   const [priorFromSender, setPriorFromSender] = useState<number | undefined>(undefined)
   const [detectionMethod, setDetectionMethod] = useState<DetectionMethod>("both")
+  const [senderPhone, setSenderPhone] = useState("")
   const fileRef = useRef<HTMLInputElement | null>(null)
 
   const { trigger: analyze, isMutating, data, error, reset } = useSWRMutation("/api/analyze", analyzeFetcher)
@@ -63,15 +65,17 @@ export default function SmsAnalyzerForm() {
       priorFromSender:
         typeof priorFromSender === "number" && !Number.isNaN(priorFromSender) ? priorFromSender : undefined,
       detectionMethod,
+      senderPhone: senderPhone.trim() || undefined,
     }
     await analyze(body)
-  }, [text, receivedAt, priorFromSender, detectionMethod, analyze])
+  }, [text, receivedAt, priorFromSender, detectionMethod, senderPhone, analyze])
 
   const onReset = useCallback(() => {
     setText("")
     setReceivedAt("")
     setPriorFromSender(undefined)
     setDetectionMethod("both")
+    setSenderPhone("")
     reset()
   }, [reset])
 
@@ -134,6 +138,17 @@ export default function SmsAnalyzerForm() {
             type="datetime-local"
             value={receivedAt}
             onChange={(e) => setReceivedAt(e.target.value)}
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label htmlFor="sender-phone">Sender Phone (optional, for history tracking)</Label>
+          <Input
+            id="sender-phone"
+            type="tel"
+            placeholder="e.g., +919876543210"
+            value={senderPhone}
+            onChange={(e) => setSenderPhone(e.target.value)}
           />
         </div>
 
@@ -283,6 +298,9 @@ export default function SmsAnalyzerForm() {
                   <AgentCard agent={data.agents.sender} />
                   <AgentCard agent={data.agents.context} />
                 </div>
+
+                {/* History Agent — separate panel */}
+                <HistoryCard agent={data.agents.history} historySummary={data.history} />
               </div>
             )}
           </div>
@@ -342,6 +360,75 @@ function AgentCard({ agent }: { agent: AgentResult }) {
         {agent.rationale ? <div className="text-sm text-muted-foreground">{agent.rationale}</div> : null}
         {agent.mismatchExplanation ? (
           <div className="text-sm text-warning">Mismatch note: {agent.mismatchExplanation}</div>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
+function HistoryCard({
+  agent,
+  historySummary,
+}: {
+  agent: AgentResult
+  historySummary?: string
+}) {
+  const hasHistory = historySummary && historySummary !== "No prior history for this sender."
+  const riskColor = {
+    suspicious: "bg-red-100 text-red-800",
+    benign: "bg-green-100 text-green-800",
+    unknown: "bg-yellow-100 text-yellow-800",
+  }[agent.classification ?? "unknown"] ?? "bg-yellow-100 text-yellow-800"
+
+  return (
+    <Card className="border-purple-200 bg-purple-50/50">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg flex items-center gap-2">
+            🕵️ Sender History Agent
+            <span className="text-xs font-normal text-muted-foreground">
+              (Past behaviour analysis)
+            </span>
+          </CardTitle>
+          <div className={cn("inline-flex rounded px-2 py-1 text-xs font-medium", riskColor)}>
+            {agent.classification ?? "unknown"} • {Math.round(agent.score * 100)}%
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* Raw history summary from Supabase */}
+        <div className="rounded bg-muted px-3 py-2 text-sm text-muted-foreground font-mono">
+          {historySummary ?? "No prior history for this sender."}
+        </div>
+
+        {/* Agent's own rationale */}
+        {agent.rationale ? (
+          <div className="text-sm text-muted-foreground">{agent.rationale}</div>
+        ) : null}
+
+        {/* Signals — only show if there's actual history */}
+        {hasHistory && agent.signals?.length ? (
+          <div className="space-y-1">
+            <div className="text-sm font-medium">Signals</div>
+            <ul className="list-disc pl-6 text-sm text-muted-foreground">
+              {agent.signals.map((s, i) => (
+                <li key={i}>{typeof s === "string" ? s : JSON.stringify(s)}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {/* No history state */}
+        {!hasHistory && (
+          <div className="text-sm text-muted-foreground italic">
+            No prior records found for this sender. Score is neutral by default.
+          </div>
+        )}
+
+        {agent.mismatchExplanation ? (
+          <div className="text-sm text-yellow-700">
+            Mismatch note: {agent.mismatchExplanation}
+          </div>
         ) : null}
       </CardContent>
     </Card>
