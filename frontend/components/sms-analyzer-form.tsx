@@ -324,7 +324,7 @@ function AgentCard({ agent }: { agent: AgentResult }) {
             <div className="text-sm font-medium">Signals</div>
             <ul className="list-disc pl-6 text-sm text-muted-foreground">
               {agent.signals.map((s, i) => (
-                <li key={i}>{s}</li>
+                <li key={i}>{typeof s === "string" ? s : JSON.stringify(s)}</li>
               ))}
             </ul>
           </div>
@@ -334,7 +334,7 @@ function AgentCard({ agent }: { agent: AgentResult }) {
             <div className="text-sm font-medium">Features</div>
             <ul className="list-disc pl-6 text-sm text-muted-foreground">
               {agent.features.map((f, i) => (
-                <li key={i}>{f}</li>
+                <li key={i}>{typeof f === "string" ? f : JSON.stringify(f)}</li>
               ))}
             </ul>
           </div>

@@ -1,6 +1,6 @@
 export type DetectionMethod = "ml-only" | "agents-only" | "both"
 
-export type AgentKey = "content" | "link" | "sender" | "context"
+export type AgentKey = "content" | "link" | "sender" | "context" | "history"
 
 export type AgentResult = {
   key: AgentKey
@@ -44,6 +44,7 @@ export type AnalysisResult = {
     link: AgentResult
     sender: AgentResult
     context: AgentResult
+    history: AgentResult 
   } | null // null when not using agents
   overall: DecisionResult
   urls?: string[]

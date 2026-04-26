@@ -183,16 +183,27 @@ async function callML(text: string, meta?: { original_text?: string; language?: 
 // FIX: support suspicionScore, legacy "score", and confidence as fallbacks
 function parseAgentResult(key: keyof typeof AGENTS, res: { text: string }): AgentResult {
   const p = safeJson<AgentJSON>(res.text)
+  
+  // Coerce signals and features to strings — LLM may return objects
+  const toStringArray = (arr: unknown): string[] => {
+    if (!Array.isArray(arr)) return []
+    return arr.map(item =>
+      typeof item === "string" ? item : JSON.stringify(item)
+    )
+  }
+
   return {
     key,
     name: AGENTS[key].name,
     score: clamp01(p?.suspicionScore ?? p?.score ?? p?.confidence ?? 0.5),
     classification: p?.classification as any,
     language: p?.language,
-    signals: p?.signals ?? [],
-    features: p?.features ?? [],
-    rationale: p?.rationale ?? "",
-    mismatchExplanation: p?.mismatchExplanation,
+    signals: toStringArray(p?.signals),   // ← fixed
+    features: toStringArray(p?.features), // ← fixed
+    rationale: typeof p?.rationale === "string" ? p.rationale : "",
+    mismatchExplanation: typeof p?.mismatchExplanation === "string"
+      ? p.mismatchExplanation
+      : undefined,
   }
 }
 
