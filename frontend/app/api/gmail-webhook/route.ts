@@ -242,6 +242,40 @@ async function processMessage(gmail: any, messageId: string) {
       console.error("Label error:", e)
     }
   }
+
+  /* 🔥 ADD YOUR ALERT BLOCK HERE */
+if (risk === "high" && process.env.GMAIL_ALERT_TO) {
+  try {
+    const emailBody = [
+      `FRAUD ALERT - High Risk Email Detected`,
+      `From: ${from}`,
+      `Subject: ${subject}`,
+      `Risk: HIGH`,
+      `Reason: ${explanation}`,
+    ].join("\n")
+
+    const rawEmail = [
+      `To: ${process.env.GMAIL_ALERT_TO}`,
+      `Subject: [FRAUD ALERT] ${subject.slice(0, 80)}`,
+      `Content-Type: text/plain; charset=utf-8`,
+      ``,
+      emailBody,
+    ].join("\n")
+
+    const encodedEmail = Buffer.from(rawEmail)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "")
+
+    await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw: encodedEmail },
+    })
+  } catch (e) {
+    console.error("Alert email error:", e)
+  }
+  
 }
 
 export async function POST(req: Request) {
