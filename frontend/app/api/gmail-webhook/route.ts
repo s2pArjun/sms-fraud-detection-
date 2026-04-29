@@ -150,7 +150,9 @@ async function getNewMessageIds(gmail: any, pushHistoryId: string): Promise<stri
         if (added.message?.id) messageIds.push(added.message.id)
       }
     }
-    return [...new Set(messageIds)]
+    const unique = [...new Set(messageIds)]
+    return unique.slice(-1) // only the most recent one
+
   } catch (err: any) {
     if (err?.code === 404 || err?.code === 410) {
       console.log(`Cursor expired, resetting to push historyId: ${pushHistoryId}`)
@@ -185,6 +187,11 @@ async function processMessage(gmail: any, messageId: string) {
     return
   }
 
+  const myEmail = process.env.GMAIL_ALERT_TO ?? ""
+  if (myEmail && fromEmail.toLowerCase() === myEmail.toLowerCase()) {
+  console.log(`Skipping self-sent email from ${fromEmail}`)
+  return
+  }
   const existingLabelIds = message.labelIds ?? []
   const { data: allLabels } = await gmail.users.labels.list({ userId: "me" })
   const fraudLabelIds = new Set(
@@ -275,7 +282,9 @@ if (risk === "high" && process.env.GMAIL_ALERT_TO) {
   } catch (e) {
     console.error("Alert email error:", e)
   }
-  
+
+}
+
 }
 
 export async function POST(req: Request) {
