@@ -280,7 +280,7 @@ ${historySummary}
       prompt: agentText,
       temperature: 0.2,
     })
-    await delay(1000)
+    await delay(12000)
 
     const lRes = await generateText({
       model: groq(AGENT_MODEL),
@@ -288,7 +288,7 @@ ${historySummary}
       prompt: `${agentText}\n\nExtracted URLs: ${JSON.stringify(urls)}`,
       temperature: 0.2,
     })
-    await delay(1000)
+    await delay(12000)
 
     const sRes = await generateText({
       model: groq(AGENT_MODEL),
@@ -296,7 +296,7 @@ ${historySummary}
       prompt: agentText,
       temperature: 0.2,
     })
-    await delay(1000)
+    await delay(12000)
 
     const ctxRes = await generateText({
       model: groq(AGENT_MODEL),
@@ -309,7 +309,7 @@ Optional context:
 - expected: ${expected ?? "unknown"}`,
       temperature: 0.2,
     })
-    await delay(1000)
+    await delay(12000)
 
     const hRes = await generateText({
       model: groq(AGENT_MODEL),
