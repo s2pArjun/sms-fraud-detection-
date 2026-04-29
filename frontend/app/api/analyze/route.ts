@@ -12,10 +12,13 @@ const AGENT_MODEL = process.env.AGENT_MODEL || "llama-3.1-8b-instant"
 const DECISION_MODEL = process.env.DECISION_MODEL || "llama-3.3-70b-versatile"
 const TRANSLATION_MODEL = process.env.TRANSLATION_MODEL || "llama-3.3-70b-versatile"
 
+// ───────────── RATE LIMIT HELPER ─────────────
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms))
+
 // ───────────── TYPES ─────────────
 type AgentJSON = {
   suspicionScore: number
-  score?: number          // backward-compat: some agents may return "score" instead
+  score?: number
   classification?: string
   language?: string
   signals: string[]
@@ -30,13 +33,13 @@ const AGENT_OUTPUT_SCHEMA = `
 Return a JSON object with:
 {
   "classification": "benign" | "suspicious" | "unknown",
-  "suspicionScore": number between 0 and 1,   // Higher = more suspicious
-  "confidence": number between 0 and 1,        // Agent's internal confidence in its output
-  "language": string (optional),               // Detected original language code if relevant
-  "mismatchExplanation": string (optional),    // Explain if classification and suspicionScore disagree
-  "signals": string[],                         // Short hints of suspicious/benign cues
-  "features": string[],                        // Structured features derived (entities, patterns, etc.)
-  "rationale": string                          // 1-2 sentence explanation
+  "suspicionScore": number between 0 and 1,
+  "confidence": number between 0 and 1,
+  "language": string (optional),
+  "mismatchExplanation": string (optional),
+  "signals": string[],
+  "features": string[],
+  "rationale": string
 }
 Only return JSON. Do not include any other text.
 `
@@ -180,36 +183,31 @@ async function callML(text: string, meta?: { original_text?: string; language?: 
 }
 
 // ───────────── PARSE HELPER ─────────────
-// FIX: support suspicionScore, legacy "score", and confidence as fallbacks
 function parseAgentResult(key: keyof typeof AGENTS, res: { text: string }): AgentResult {
   const p = safeJson<AgentJSON>(res.text)
-  
-  // Coerce signals and features to strings — LLM may return objects
-const toStringArray = (arr: unknown): string[] => {
-  if (!Array.isArray(arr)) return []
-  return arr.map(item => {
-    if (typeof item === "string") return item
-    if (typeof item === "object" && item !== null) {
-      const obj = item as Record<string, any>
-      // Handle {type, entities} shape — flatten to readable strings
-      if (obj.type === "entities" && Array.isArray(obj.entities)) {
-        return obj.entities.map((e: any) =>
-          typeof e === "string" ? e : `${e.text ?? ""} (${e.type ?? "entity"})`
-        ).join(", ")
+
+  const toStringArray = (arr: unknown): string[] => {
+    if (!Array.isArray(arr)) return []
+    return arr.map(item => {
+      if (typeof item === "string") return item
+      if (typeof item === "object" && item !== null) {
+        const obj = item as Record<string, any>
+        if (obj.type === "entities" && Array.isArray(obj.entities)) {
+          return obj.entities.map((e: any) =>
+            typeof e === "string" ? e : `${e.text ?? ""} (${e.type ?? "entity"})`
+          ).join(", ")
+        }
+        if (obj.type === "patterns" && Array.isArray(obj.patterns)) {
+          return obj.patterns.map((p: any) =>
+            typeof p === "string" ? p : `${p.text ?? ""}`
+          ).join(", ")
+        }
+        const values = Object.values(obj).filter(v => typeof v === "string")
+        if (values.length > 0) return values.join(": ")
       }
-      // Handle {type, patterns} shape
-      if (obj.type === "patterns" && Array.isArray(obj.patterns)) {
-        return obj.patterns.map((p: any) =>
-          typeof p === "string" ? p : `${p.text ?? ""}`
-        ).join(", ")
-      }
-      // Generic fallback — extract all string values
-      const values = Object.values(obj).filter(v => typeof v === "string")
-      if (values.length > 0) return values.join(": ")
-    }
-    return JSON.stringify(item)
-  }).filter(Boolean)
-}
+      return JSON.stringify(item)
+    }).filter(Boolean)
+  }
 
   return {
     key,
@@ -217,8 +215,8 @@ const toStringArray = (arr: unknown): string[] => {
     score: clamp01(p?.suspicionScore ?? p?.score ?? p?.confidence ?? 0.5),
     classification: p?.classification as any,
     language: p?.language,
-    signals: toStringArray(p?.signals),   // ← fixed
-    features: toStringArray(p?.features), // ← fixed
+    signals: toStringArray(p?.signals),
+    features: toStringArray(p?.features),
     rationale: typeof p?.rationale === "string" ? p.rationale : "",
     mismatchExplanation: typeof p?.mismatchExplanation === "string"
       ? p.mismatchExplanation
@@ -267,51 +265,58 @@ OriginalText:
   }
 
   if (detectionMethod === "agents-only" || detectionMethod === "both") {
-    // FIX: history agent receives both the SMS context AND the history summary
     const historyPrompt = `${agentText}
 
 Sender History Summary:
 ${historySummary}
 `
+    // ── Sequential agent calls with 1s delay between each ──
+    // Groq free tier: 6000 TPM. Each agent uses ~1000-1300 tokens.
+    // Running all 5 in parallel would request ~6500 tokens at once → 429.
+    // Staggering them 1s apart keeps each request under the rolling TPM window.
+    const cRes = await generateText({
+      model: groq(AGENT_MODEL),
+      system: AGENTS.content.system,
+      prompt: agentText,
+      temperature: 0.2,
+    })
+    await delay(1000)
 
-    const [cRes, lRes, sRes, ctxRes, hRes] = await Promise.all([
-      generateText({
-        model: groq(AGENT_MODEL),
-        system: AGENTS.content.system,
-        prompt: agentText,
-        temperature: 0.2,
-      }),
-      generateText({
-        model: groq(AGENT_MODEL),
-        system: AGENTS.link.system,
-        prompt: `${agentText}\n\nExtracted URLs: ${JSON.stringify(urls)}`,
-        temperature: 0.2,
-      }),
-      generateText({
-        model: groq(AGENT_MODEL),
-        system: AGENTS.sender.system,
-        prompt: agentText,
-        temperature: 0.2,
-      }),
-      generateText({
-        model: groq(AGENT_MODEL),
-        system: AGENTS.context.system,
-        prompt: `${agentText}
+    const lRes = await generateText({
+      model: groq(AGENT_MODEL),
+      system: AGENTS.link.system,
+      prompt: `${agentText}\n\nExtracted URLs: ${JSON.stringify(urls)}`,
+      temperature: 0.2,
+    })
+    await delay(1000)
+
+    const sRes = await generateText({
+      model: groq(AGENT_MODEL),
+      system: AGENTS.sender.system,
+      prompt: agentText,
+      temperature: 0.2,
+    })
+    await delay(1000)
+
+    const ctxRes = await generateText({
+      model: groq(AGENT_MODEL),
+      system: AGENTS.context.system,
+      prompt: `${agentText}
 
 Optional context:
 - receivedAt: ${receivedAt ?? "unknown"}
 - priorFromSender (7d): ${priorFromSender ?? "unknown"}
 - expected: ${expected ?? "unknown"}`,
-        temperature: 0.2,
-      }),
-      // FIX: history agent gets full SMS context + history summary
-      generateText({
-        model: groq(AGENT_MODEL),
-        system: AGENTS.history.system,
-        prompt: historyPrompt,
-        temperature: 0.2,
-      }),
-    ])
+      temperature: 0.2,
+    })
+    await delay(1000)
+
+    const hRes = await generateText({
+      model: groq(AGENT_MODEL),
+      system: AGENTS.history.system,
+      prompt: historyPrompt,
+      temperature: 0.2,
+    })
 
     agentResults = {
       content: parseAgentResult("content", cRes),
@@ -379,21 +384,20 @@ Return only strict JSON: {"risk":"low"|"medium"|"high","confidence":number,"expl
   }
 
   // ── 4. Save to Supabase ──
-// ── 4. Save to Supabase ──
-if (phone) {
-  const { error: dbError } = await supabase.from("fraud_checks").insert({
-    phone,
-    text_preview: text.slice(0, 200),
-    risk: decision.risk,
-    ml_prediction: mlResult?.prediction ?? "unknown",
-    ml_confidence: mlResult?.confidence ?? 0,
-    explanation: decision.explanation ?? "",
-    checked_at: new Date().toISOString(),
-  })
-  if (dbError) {
-    console.error("Supabase insert error:", dbError)
+  if (phone) {
+    const { error: dbError } = await supabase.from("fraud_checks").insert({
+      phone,
+      text_preview: text.slice(0, 200),
+      risk: decision.risk,
+      ml_prediction: mlResult?.prediction ?? "unknown",
+      ml_confidence: mlResult?.confidence ?? 0,
+      explanation: decision.explanation ?? "",
+      checked_at: new Date().toISOString(),
+    })
+    if (dbError) {
+      console.error("Supabase insert error:", dbError)
+    }
   }
-}
 
   // ── 5. Return ──
   const result: AnalysisResult = {
