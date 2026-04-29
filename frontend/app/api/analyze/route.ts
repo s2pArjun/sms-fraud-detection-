@@ -5,6 +5,18 @@ import { supabase, type FraudCheck } from "@/lib/supabase"
 import type { AnalysisResult, AgentResult, DecisionResult } from "@/lib/types"
 import { clamp01, extractUrls, safeJson } from "@/lib/utils-local"
 
+
+// ───────── GLOBAL ANALYZE QUEUE ─────────
+let analyzeQueue: Promise<any> = Promise.resolve()
+
+function enqueueAnalyze<T>(fn: () => Promise<T>): Promise<T> {
+  const next = analyzeQueue.then(() => fn())
+  analyzeQueue = next.catch(() => {}) // prevent chain break
+  return next
+}
+
+
+
 export const maxDuration = 60
 
 // ───────────── MODELS ─────────────
@@ -226,6 +238,7 @@ function parseAgentResult(key: keyof typeof AGENTS, res: { text: string }): Agen
 
 // ───────────── MAIN ─────────────
 export async function POST(req: Request) {
+  return enqueueAnalyze(async () => {
   const body = await req.json().catch(() => ({}))
   const text             = (body?.text ?? "") as string
   const phone            = (body?.senderPhone ?? "") as string
@@ -280,7 +293,7 @@ ${historySummary}
       prompt: agentText,
       temperature: 0.2,
     })
-    await delay(12000)
+    await delay(3000)
 
     const lRes = await generateText({
       model: groq(AGENT_MODEL),
@@ -288,7 +301,7 @@ ${historySummary}
       prompt: `${agentText}\n\nExtracted URLs: ${JSON.stringify(urls)}`,
       temperature: 0.2,
     })
-    await delay(12000)
+    await delay(3000)
 
     const sRes = await generateText({
       model: groq(AGENT_MODEL),
@@ -296,7 +309,7 @@ ${historySummary}
       prompt: agentText,
       temperature: 0.2,
     })
-    await delay(12000)
+    await delay(3000)
 
     const ctxRes = await generateText({
       model: groq(AGENT_MODEL),
@@ -309,7 +322,7 @@ Optional context:
 - expected: ${expected ?? "unknown"}`,
       temperature: 0.2,
     })
-    await delay(12000)
+    await delay(3000)
 
     const hRes = await generateText({
       model: groq(AGENT_MODEL),
@@ -430,4 +443,5 @@ Return only strict JSON: {"risk":"low"|"medium"|"high","confidence":number,"expl
   }
 
   return NextResponse.json(result, { status: 200 })
+  })
 }
