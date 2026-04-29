@@ -78,9 +78,6 @@ async function getOrCreateLabel(gmail: any, name: string): Promise<string> {
 }
 
 // ── Persistent dedup via Supabase ─────────────────────────────────────────
-// This works across serverless invocations unlike in-memory sets.
-// Uses the fraud_checks table with a synthetic phone = "gmail:messageId"
-// so no schema changes needed.
 async function isAlreadyProcessed(messageId: string): Promise<boolean> {
   const { data } = await supabase
     .from("fraud_checks")
@@ -102,31 +99,62 @@ async function markAsProcessed(messageId: string): Promise<void> {
   })
 }
 
-// ── Core: fetch new messages using History API ────────────────────────────
-// This is the RIGHT way to use Gmail Pub/Sub. historyId tells you exactly
-// where to start — only messages added since that point are returned.
-async function getNewMessageIds(gmail: any, historyId: string): Promise<string[]> {
+// ── NEW: Persistent history cursor ────────────────────────────────────────
+const HISTORY_CURSOR_KEY = "gmail:lastHistoryId"
+
+async function getLastHistoryId(): Promise<string | null> {
+  const { data } = await supabase
+    .from("fraud_checks")
+    .select("text_preview")
+    .eq("phone", HISTORY_CURSOR_KEY)
+    .order("checked_at", { ascending: false })
+    .limit(1)
+  return data?.[0]?.text_preview ?? null
+}
+
+async function saveLastHistoryId(historyId: string): Promise<void> {
+  await supabase.from("fraud_checks").insert({
+    phone: HISTORY_CURSOR_KEY,
+    text_preview: historyId,
+    risk: "low",
+    ml_prediction: "unknown",
+    ml_confidence: 0,
+    explanation: "gmail-historyId-cursor",
+    checked_at: new Date().toISOString(),
+  })
+}
+
+// ── UPDATED: getNewMessageIds ─────────────────────────────────────────────
+async function getNewMessageIds(gmail: any, pushHistoryId: string): Promise<string[]> {
+  const storedId = await getLastHistoryId()
+  const startHistoryId = storedId ?? pushHistoryId
+
+  console.log(`Using startHistoryId: ${startHistoryId} (stored: ${storedId}, push: ${pushHistoryId})`)
+
   try {
     const { data } = await gmail.users.history.list({
       userId: "me",
-      startHistoryId: historyId,
+      startHistoryId,
       historyTypes: ["messageAdded"],
       labelId: "INBOX",
     })
 
+    if (data.historyId) {
+      await saveLastHistoryId(data.historyId)
+      console.log(`Cursor advanced to historyId: ${data.historyId}`)
+    }
+
     const messageIds: string[] = []
     for (const record of data.history ?? []) {
       for (const added of record.messagesAdded ?? []) {
-        if (added.message?.id) {
-          messageIds.push(added.message.id)
-        }
+        if (added.message?.id) messageIds.push(added.message.id)
       }
     }
-    return [...new Set(messageIds)] // deduplicate
+    return [...new Set(messageIds)]
   } catch (err: any) {
-    // historyId too old (410 Gone) — nothing we can do, skip gracefully
     if (err?.code === 404 || err?.code === 410) {
-      console.log(`History ID ${historyId} expired or not found, skipping`)
+      console.log(`Cursor expired, resetting to push historyId: ${pushHistoryId}`)
+      await saveLastHistoryId(pushHistoryId)
       return []
     }
     throw err
@@ -134,13 +162,11 @@ async function getNewMessageIds(gmail: any, historyId: string): Promise<string[]
 }
 
 async function processMessage(gmail: any, messageId: string) {
-  // Persistent dedup check
   if (await isAlreadyProcessed(messageId)) {
     console.log(`Message ${messageId} already processed (supabase dedup), skipping`)
     return
   }
 
-  // Mark immediately before any async work to prevent races
   await markAsProcessed(messageId)
 
   const { data: message } = await gmail.users.messages.get({
@@ -154,13 +180,11 @@ async function processMessage(gmail: any, messageId: string) {
   const from = headers.find((h: any) => h.name === "From")?.value ?? ""
   const fromEmail = from.match(/<([^>]+)>/)?.[1] ?? from
 
-  // Loop prevention: skip our own fraud alert emails
   if (/\[FRAUD[\s_]/i.test(subject)) {
     console.log(`Skipping fraud alert email: "${subject.slice(0, 60)}"`)
     return
   }
 
-  // Skip already-labeled messages
   const existingLabelIds = message.labelIds ?? []
   const { data: allLabels } = await gmail.users.labels.list({ userId: "me" })
   const fraudLabelIds = new Set(
@@ -217,44 +241,6 @@ async function processMessage(gmail: any, messageId: string) {
     } catch (e) {
       console.error("Label error:", e)
     }
-
-    if (risk === "high" && process.env.GMAIL_ALERT_TO) {
-      try {
-        const emailBody = [
-          `FRAUD ALERT - High Risk Email Detected`,
-          ``,
-          `From: ${from}`,
-          `Subject: ${subject}`,
-          ``,
-          `Risk: HIGH`,
-          `Reason: ${explanation}`,
-          ``,
-          `The email has been labelled FRAUD_HIGH and removed from your inbox.`,
-        ].join("\n")
-
-        const rawEmail = [
-          `To: ${process.env.GMAIL_ALERT_TO}`,
-          `Subject: [FRAUD ALERT] ${subject.slice(0, 80)}`,
-          `Content-Type: text/plain; charset=utf-8`,
-          ``,
-          emailBody,
-        ].join("\n")
-
-        const encodedEmail = Buffer.from(rawEmail)
-          .toString("base64")
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=+$/, "")
-
-        await gmail.users.messages.send({
-          userId: "me",
-          requestBody: { raw: encodedEmail },
-        })
-        console.log(`Alert email sent to ${process.env.GMAIL_ALERT_TO}`)
-      } catch (e) {
-        console.error("Alert email error:", e)
-      }
-    }
   }
 }
 
@@ -270,7 +256,6 @@ export async function POST(req: Request) {
       pubsubBody.message.message_id ??
       "unknown"
 
-    // ── Drop stale backlogged Pub/Sub messages ────────────────────────────
     const publishTime = pubsubBody.message.publishTime ?? pubsubBody.message.publish_time
     if (publishTime) {
       const ageMs = Date.now() - new Date(publishTime).getTime()
@@ -294,14 +279,8 @@ export async function POST(req: Request) {
 
     console.log(`Pub/Sub received: messageId=${pubsubMessageId}, historyId=${historyId}`)
 
-    // ── ALWAYS return 200 to Pub/Sub immediately ──────────────────────────
-    // Do NOT await the processing inside the response. Fire and forget.
-    // This prevents Pub/Sub from retrying just because your analysis is slow.
-    // Note: on Vercel, the function stays alive until the promise resolves
-    // because we're inside the request handler — so processing will complete.
     const gmail = getGmailClient()
 
-    // FIX: Use History API to get only genuinely new message IDs
     const newMessageIds = await getNewMessageIds(gmail, historyId)
 
     if (newMessageIds.length === 0) {
@@ -311,7 +290,6 @@ export async function POST(req: Request) {
 
     console.log(`Found ${newMessageIds.length} new message(s): ${newMessageIds.join(", ")}`)
 
-    // Process each new message (sequentially to respect Groq TPM)
     for (const messageId of newMessageIds) {
       await processMessage(gmail, messageId)
     }
@@ -319,7 +297,6 @@ export async function POST(req: Request) {
     return new Response("OK", { status: 200 })
   } catch (error) {
     console.error("Gmail webhook error:", error)
-    // Still return 200 to prevent Pub/Sub retry storm
     return new Response("OK", { status: 200 })
   }
 }
