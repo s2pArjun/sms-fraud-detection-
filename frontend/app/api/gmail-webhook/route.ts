@@ -334,8 +334,10 @@ export async function POST(req: Request) {
     console.log(`Found ${newMessageIds.length} new message(s): ${newMessageIds.join(", ")}`)
 
     for (const messageId of newMessageIds) {
-      await processMessage(gmail, messageId)
-    }
+  processMessage(gmail, messageId).catch(err =>
+    console.error("processMessage failed:", err)
+  )
+}
 
     return new Response("OK", { status: 200 })
   } catch (error) {
