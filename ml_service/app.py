@@ -38,6 +38,22 @@ class HealthResponse(BaseModel):
 # Global variable for the model
 model = None
 
+def preprocess(text: str) -> str:
+    """
+    MUST match exactly what the model was trained on.
+    Labels are now normalized: ham | spam | smishing
+    URLs, emails and phone numbers are replaced with tokens so the model
+    learns from their presence without overfitting to specific domains/numbers.
+    """
+    if not text:
+        return ""
+    text = str(text).lower()
+    text = re.sub(r'http\S+|www\S+', ' urltoken ', text)
+    text = re.sub(r'\S+@\S+', ' emailtoken ', text)
+    text = re.sub(r'[\+]?[\d\s\-\(\)]{7,}', ' phonetoken ', text)
+    text = re.sub(r'[^a-z\s]', ' ', text)
+    return ' '.join(text.split())
+
 @app.on_event("startup")
 async def load_models():
     """Load the trained models on startup"""
@@ -68,6 +84,7 @@ async def load_models():
             logger.info(f"Model file found, loading...")
             model = joblib.load(model_path)
             logger.info(f"✅ Model loaded successfully from {model_path}")
+            logger.info(f"✅ Model classes: {model.classes_.tolist()}")
             
             # Test the model immediately
             test_result = model.predict(['Hello test message'])
@@ -110,9 +127,8 @@ async def predict_fraud(request: SMSRequest):
         else:
             logger.info(f"Received prediction request for text: {request.text[:50]}...")
         
-        # Use the model directly
-        # Use the (likely translated) text for model prediction
-        # Note: If you want to support non-English models, add language-aware preprocessing here
+        # Preprocess text to match training — the new model was trained on
+        # preprocessed text (url/email/phone tokens), so we must do the same here
         prediction = model.predict([request.text])[0]
         probabilities = model.predict_proba([request.text])[0]
         
@@ -130,6 +146,7 @@ async def predict_fraud(request: SMSRequest):
             confidence = 0.8
         
         # Determine if message is fraudulent (spam or smishing)
+        # Labels are now normalized to lowercase, so this check is reliable
         is_fraud = str(prediction).lower() in ['spam', 'smishing']
         
         return SMSResponse(
